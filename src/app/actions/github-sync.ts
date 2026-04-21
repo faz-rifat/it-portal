@@ -3,11 +3,12 @@
 import { fetchGitHubProjectItems } from '@/lib/github-service';
 
 /**
- * Fetches GitHub Project 181 items (existing — unchanged behaviour).
+ * Fetches ALL items from GitHub Project 181 (Service Desk / L2).
+ * Filtering to specific agents is done in the UI layer (page.tsx).
  */
-export async function fetchGitHubIssuesAction(since?: string) {
+export async function fetchGitHubIssuesAction() {
   try {
-    const items = await fetchGitHubProjectItems(181, since);
+    const items = await fetchGitHubProjectItems(181);
     return { success: true, items };
   } catch (error: any) {
     console.error("GitHub Fetch Error:", error);
@@ -16,11 +17,11 @@ export async function fetchGitHubIssuesAction(since?: string) {
 }
 
 /**
- * Fetches GitHub Project 358 (Workhub) items.
+ * Fetches ALL items from GitHub Project 358 (Workhub).
  */
-export async function fetchWorkhubIssuesAction(since?: string) {
+export async function fetchWorkhubIssuesAction() {
   try {
-    const items = await fetchGitHubProjectItems(358, since);
+    const items = await fetchGitHubProjectItems(358);
     return { success: true, items };
   } catch (error: any) {
     console.error("Workhub GitHub Fetch Error:", error);
@@ -29,11 +30,11 @@ export async function fetchWorkhubIssuesAction(since?: string) {
 }
 
 /**
- * Fetches GitHub Project 305 (Techsupport) items.
+ * Fetches ALL items from GitHub Project 305 (Techsupport).
  */
-export async function fetchTechsupportIssuesAction(since?: string) {
+export async function fetchTechsupportIssuesAction() {
   try {
-    const items = await fetchGitHubProjectItems(305, since);
+    const items = await fetchGitHubProjectItems(305);
     return { success: true, items };
   } catch (error: any) {
     console.error("Techsupport GitHub Fetch Error:", error);
