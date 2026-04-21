@@ -1,9 +1,14 @@
-
 "use client"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Github, Link2, AlertCircle } from 'lucide-react';
+
+const CONNECTED_PROJECTS = [
+  { number: 181, name: "Service Desk", description: "SELISE Digital Platforms Board" },
+  { number: 358, name: "Workhub",      description: "Workhub Project Board" },
+  { number: 305, name: "Techsupport",  description: "IT Support Project Board" },
+];
 
 export default function ConnectPage() {
   return (
@@ -18,21 +23,26 @@ export default function ConnectPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Github className="h-5 w-5" />
-              Connected Repository
+              Connected Repositories
             </CardTitle>
             <CardDescription>Currently syncing from SELISEdigitalplatforms</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between p-4 bg-card rounded-lg border">
-              <div className="flex flex-col">
-                <span className="text-sm font-bold">Project 181</span>
-                <span className="text-xs text-muted-foreground">SELISE Digital Platforms Board</span>
+          <CardContent className="space-y-3">
+            {CONNECTED_PROJECTS.map((project) => (
+              <div
+                key={project.number}
+                className="flex items-center justify-between p-4 bg-card rounded-lg border"
+              >
+                <div className="flex flex-col">
+                  <span className="text-sm font-bold">Project {project.number} — {project.name}</span>
+                  <span className="text-xs text-muted-foreground">{project.description}</span>
+                </div>
+                <Button size="sm" variant="outline" className="gap-2">
+                  <Link2 className="h-4 w-4" /> Disconnect
+                </Button>
               </div>
-              <Button size="sm" variant="outline" className="gap-2">
-                <Link2 className="h-4 w-4" /> Disconnect
-              </Button>
-            </div>
-            <p className="text-xs text-muted-foreground">
+            ))}
+            <p className="text-xs text-muted-foreground pt-1">
               Last successful sync: {new Date().toLocaleString()}
             </p>
           </CardContent>
