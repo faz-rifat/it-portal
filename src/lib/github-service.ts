@@ -42,6 +42,27 @@ export interface GitHubProjectItem {
   };
 }
 
+interface GitHubPageInfo {
+  hasNextPage: boolean;
+  endCursor: string;
+}
+
+interface GitHubProjectItemsPage {
+  pageInfo: GitHubPageInfo;
+  nodes: GitHubProjectItem[];
+}
+
+interface GitHubGraphQLResponse {
+  data: {
+    organization: {
+      projectV2: {
+        items: GitHubProjectItemsPage;
+      };
+    };
+  };
+  errors?: unknown[];
+}
+
 /**
  * Fetches ALL items from a GitHub ProjectV2, paginating through every page.
  * @param projectNumber - The GitHub project number (e.g. 181, 358, 305)
@@ -108,7 +129,7 @@ export async function fetchGitHubProjectItems(projectNumber: number = 181): Prom
 
   // Paginate until all items are fetched
   while (true) {
-    const response = await fetch(GRAPHQL_URL, {
+    const response: Response = await fetch(GRAPHQL_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -127,14 +148,14 @@ export async function fetchGitHubProjectItems(projectNumber: number = 181): Prom
       );
     }
 
-    const result = await response.json();
+    const result: GitHubGraphQLResponse = await response.json();
 
     if (result.errors) {
       throw new Error(`GitHub GraphQL Error: ${JSON.stringify(result.errors)}`);
     }
 
-    const page = result.data.organization.projectV2.items;
-    allItems.push(...(page.nodes as GitHubProjectItem[]));
+    const page: GitHubProjectItemsPage = result.data.organization.projectV2.items;
+    allItems.push(...page.nodes);
 
     if (!page.pageInfo.hasNextPage) break;
     cursor = page.pageInfo.endCursor;
