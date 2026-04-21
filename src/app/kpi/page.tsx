@@ -101,7 +101,9 @@ function computeKPIs(
   const targetYear = parseInt(selectedYear);
 
   let filtered = rawIssues.filter(issue => {
-    const d = new Date(issue.githubCreatedAt);
+    // Prefer dateReported (custom field) over githubCreatedAt (board addition date)
+    const dateStr = issue.dateReported || issue.githubCreatedAt;
+    const d = new Date(dateStr);
     return getMonth(d) === targetMonth && getYear(d) === targetYear;
   });
   if (filterFn) filtered = filtered.filter(filterFn);
@@ -613,14 +615,15 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
   );
 }
 
-// ── Workhub / Techsupport Section (with Sync button) ─────────────────────────
+// ── Service Desk / Workhub / Techsupport Section (with Sync button) ─────────────────────────
 
 function ProjectKPISection({
-  projectId, projectLabel, projectNumber, fetchAction, selectedMonth, selectedYear,
+  projectId, projectLabel, projectNumber, fetchAction, selectedMonth, selectedYear, agentFilter,
 }: {
   projectId: string; projectLabel: string; projectNumber: number;
   fetchAction: () => Promise<{ success: boolean; items?: any[]; error?: string }>;
   selectedMonth: string; selectedYear: string;
+  agentFilter?: string[];
 }) {
   const { user } = useUser();
   const db = useFirestore();
@@ -633,6 +636,23 @@ function ProjectKPISection({
   }, [db, user, projectId]);
 
   const { data: rawIssues, isLoading } = useCollection(issuesQuery);
+
+  const stats = useMemo(() => {
+    if (agentFilter && agentFilter.length > 0) {
+      const agentsLower = agentFilter.map(m => m.toLowerCase());
+      return computeKPIs(rawIssues || [], selectedMonth, selectedYear, (issue) => {
+        const isTeamAuthor = agentsLower.includes((issue.reporterUsername || "").toLowerCase());
+        const isTeamAssignee = (issue.assigneeUsernames || []).some(
+          (a: string) => agentsLower.includes(a.toLowerCase())
+        );
+        const isL2Status = issue.customStatus === 'Dhaka Team (L2)';
+        const isObservingStatus = issue.customStatus === 'Under Observation (L2)';
+        const isL2Label = issue.labelNames?.some((l: string) => l.toUpperCase() === 'L2') || false;
+        return (isTeamAuthor || isTeamAssignee) && (isL2Status || isObservingStatus || isL2Label);
+      });
+    }
+    return computeKPIs(rawIssues || [], selectedMonth, selectedYear);
+  }, [rawIssues, selectedMonth, selectedYear, agentFilter]);
 
   const handleSync = async () => {
     if (!db || !user) return;
@@ -680,7 +700,7 @@ function ProjectKPISection({
           assigneeUsernames: content.assignees?.nodes?.map((n: any) => n.login) || [],
           closedBy: gfv(["closed by", "closer", "completed by", "closedby", "mark as completed"]) || (content.closed ? "GitHub System" : ""),
           labelNames: content.labels?.nodes?.map((n: any) => n.name) || [],
-          projectId, githubCreatedAt: item.createdAt || new Date().toISOString(),
+          projectId, githubCreatedAt: gfv(["date reported", "reported at"]) || item.createdAt || new Date().toISOString(),
           githubUpdatedAt: content.updatedAt || new Date().toISOString(),
           lastFetchedAt: new Date().toISOString(),
           dateReported: gfv(["date reported", "reported at"]),
@@ -705,8 +725,6 @@ function ProjectKPISection({
       setSyncing(false);
     }
   };
-
-  const stats = useMemo(() => computeKPIs(rawIssues || [], selectedMonth, selectedYear), [rawIssues, selectedMonth, selectedYear]);
 
   if (isLoading) return (
     <div className="flex h-[40vh] w-full items-center justify-center">
@@ -766,30 +784,9 @@ export default function KPIPage() {
     setSelectedYear(getYear(now).toString());
   }, []);
 
-  const issuesQuery = useMemoFirebase(() => {
-    if (!db || !user) return null;
-    return query(collection(db, 'enterprise-projects', 'github-project-181', 'issues'), orderBy('githubCreatedAt', 'desc'));
-  }, [db, user]);
 
-  const { data: rawIssues, isLoading } = useCollection(issuesQuery);
 
-  const l2Stats = useMemo(() => {
-    const agentsLower = SERVICE_DESK_AGENTS.map(m => m.toLowerCase());
-    return computeKPIs(rawIssues || [], selectedMonth, selectedYear, (issue) => {
-      const isTeamAuthor = agentsLower.includes((issue.reporterUsername || "").toLowerCase());
-      // Also match if any assignee is one of the 6 agents
-      const isTeamAssignee = (issue.assigneeUsernames || []).some(
-        (a: string) => agentsLower.includes(a.toLowerCase())
-      );
-      const isL2Status = issue.customStatus === 'Dhaka Team (L2)';
-      const isObservingStatus = issue.customStatus === 'Under Observation (L2)';
-      const isL2Label = issue.labelNames?.some((l: string) => l.toUpperCase() === 'L2') || false;
-      // Only include ticket if it involves one of the 6 agents AND is L2-related
-      return (isTeamAuthor || isTeamAssignee) && (isL2Status || isObservingStatus || isL2Label);
-    });
-  }, [rawIssues, selectedMonth, selectedYear]);
-
-  if (isLoading || !user || selectedMonth === "") {
+  if (!user || selectedMonth === "") {
     return (
       <div className="flex h-[60vh] w-full items-center justify-center">
         <Loader2 className="h-10 w-10 animate-spin text-primary opacity-20" />
@@ -841,7 +838,7 @@ export default function KPIPage() {
       <Tabs defaultValue="l2" className="w-full">
         <TabsList className="grid w-full grid-cols-3 mb-6">
           <TabsTrigger value="l2" className="gap-2">
-            <Activity className="h-4 w-4" /> L2 / Project 181
+            <Activity className="h-4 w-4" /> Service Desk
           </TabsTrigger>
           <TabsTrigger value="workhub" className="gap-2">
             <Briefcase className="h-4 w-4" /> Workhub
@@ -852,7 +849,15 @@ export default function KPIPage() {
         </TabsList>
 
         <TabsContent value="l2">
-          <KPIPanel stats={l2Stats} selectedMonth={selectedMonth} />
+          <ProjectKPISection
+            projectId="github-project-181"
+            projectLabel="Service Desk"
+            projectNumber={181}
+            fetchAction={fetchGitHubIssuesAction}
+            selectedMonth={selectedMonth}
+            selectedYear={selectedYear}
+            agentFilter={SERVICE_DESK_AGENTS}
+          />
         </TabsContent>
 
         <TabsContent value="workhub">
