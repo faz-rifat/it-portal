@@ -1,0 +1,191 @@
+
+{
+  "entities": {
+    "User": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "User",
+      "type": "object",
+      "description": "Represents a user of the SELISE-ITO Portal, authenticated via an external system (e.g., Firebase). This entity stores application-specific user data rather than authentication credentials.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the User entity."
+        },
+        "email": {
+          "type": "string",
+          "description": "The email address of the user, typically provided by the external authentication system.",
+          "format": "email"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The display name of the user, typically provided by the external authentication system."
+        },
+        "role": {
+          "type": "string",
+          "description": "The user's role in the portal.",
+          "enum": ["admin", "user"]
+        },
+        "needsPasswordChange": {
+          "type": "boolean",
+          "description": "Flag indicating if the user is required to change their password on next login."
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Timestamp indicating when the user account was created in the portal.",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp indicating when the user account information was last updated in the portal.",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "email",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "GitHubIssue": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "GitHubIssue",
+      "type": "object",
+      "description": "Represents an issue (ticket) fetched from a GitHub repository, stored for display and analysis within the SELISE-ITO Portal.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the GitHubIssue entity."
+        },
+        "githubIssueNumber": {
+          "type": "number",
+          "description": "The public issue number from GitHub."
+        },
+        "title": {
+          "type": "string",
+          "description": "The title of the GitHub issue."
+        },
+        "description": {
+          "type": "string",
+          "description": "The full description or body text of the GitHub issue."
+        },
+        "status": {
+          "type": "string",
+          "description": "The current state of the issue (e.g., 'OPEN', 'CLOSED')."
+        },
+        "reporterUsername": {
+          "type": "string",
+          "description": "The GitHub username of the issue's author."
+        },
+        "assigneeUsernames": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "An array of GitHub usernames currently assigned to this issue."
+        },
+        "closedBy": {
+          "type": "string",
+          "description": "The GitHub username of the person who closed the ticket."
+        },
+        "labelNames": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "An array of labels applied to this issue on GitHub."
+        },
+        "url": {
+          "type": "string",
+          "description": "The URL to the GitHub issue on github.com.",
+          "format": "uri"
+        },
+        "githubCreatedAt": {
+          "type": "string",
+          "description": "Timestamp when the issue was created on GitHub.",
+          "format": "date-time"
+        },
+        "githubUpdatedAt": {
+          "type": "string",
+          "description": "Timestamp when the issue was last updated on GitHub.",
+          "format": "date-time"
+        },
+        "lastFetchedAt": {
+          "type": "string",
+          "description": "Timestamp of when this record was last synced.",
+          "format": "date-time"
+        },
+        "fcr": {
+          "type": "string",
+          "description": "First Contact Resolution status."
+        },
+        "responseTimeMinutes": {
+          "type": "string",
+          "description": "Response time in minutes."
+        },
+        "supportHours": {
+          "type": "string",
+          "description": "Total support hours logged."
+        },
+        "clientType": {
+          "type": "string",
+          "description": "Type of client (e.g. Enterprise, SME)."
+        },
+        "customStatus": {
+          "type": "string",
+          "description": "The Project-specific status field."
+        },
+        "latestCommentBody": {
+          "type": "string",
+          "description": "The body of the most recent comment."
+        },
+        "latestCommentAuthor": {
+          "type": "string",
+          "description": "The author of the most recent comment."
+        },
+        "latestCommentAt": {
+          "type": "string",
+          "description": "The timestamp of the most recent comment."
+        },
+        "contentType": {
+          "type": "string",
+          "description": "Type of GitHub item (Issue or PullRequest)."
+        }
+      },
+      "required": [
+        "id",
+        "githubIssueNumber",
+        "title",
+        "status",
+        "reporterUsername",
+        "url",
+        "githubCreatedAt"
+      ]
+    }
+  },
+  "auth": {
+    "providers": [
+      "password"
+    ]
+  },
+  "firestore": {
+    "structure": [
+      {
+        "path": "/users/{userId}",
+        "definition": {
+          "entityName": "User",
+          "schema": {
+            "$ref": "#/backend/entities/User"
+          },
+          "description": "Stores application-specific profile data for each user."
+        }
+      },
+      {
+        "path": "/enterprise-projects/github-project-181/issues/{issueId}",
+        "definition": {
+          "entityName": "GitHubIssue",
+          "schema": {
+            "$ref": "#/backend/entities/GitHubIssue"
+          },
+          "description": "Shared enterprise issues synced from GitHub Project 181."
+        }
+      }
+    ]
+  }
+}

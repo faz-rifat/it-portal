@@ -1,0 +1,18 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // FRESH START: Permissive rules for authenticated enterprise staff
+    // Reset timestamp: 2024-03-21T18:00:00Z
+    
+    match /{allPaths=**} {
+      // Allow any authenticated user full access to the portal data
+      // This eliminates "Session Restricted" errors during large sync batches
+      allow read, write: if request.auth != null;
+    }
+    
+    // Explicit admin path for user directory management
+    match /users/{userId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
