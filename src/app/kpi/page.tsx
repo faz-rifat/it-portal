@@ -83,7 +83,8 @@ function computeKPIs(
   rawIssues: any[],
   selectedMonth: string,
   selectedYear: string,
-  filterFn?: (issue: any) => boolean
+  filterFn?: (issue: any) => boolean,
+  teamMembers?: string[]
 ) {
   const empty = {
     total: 0, fcr: "0.0", art: "0.0", mttr: "0.0", chartData: [],
@@ -96,7 +97,17 @@ function computeKPIs(
 
   if (!rawIssues || selectedMonth === "" || selectedYear === "") return empty;
 
-  const teamLower = TEAM_MEMBERS.map(m => m.toLowerCase());
+  // If teamMembers provided (Service Desk), use them. Otherwise derive from ticket assignees/reporters.
+  const resolvedTeam: string[] = teamMembers && teamMembers.length > 0
+    ? teamMembers
+    : Array.from(new Set(
+        filtered.flatMap(issue => [
+          ...(issue.assigneeUsernames || []),
+          issue.reporterUsername || "",
+          issue.closedBy || "",
+        ].filter(Boolean))
+      ));
+  const teamLower = resolvedTeam.map((m: string) => m.toLowerCase());
   const targetMonth = parseInt(selectedMonth);
   const targetYear = parseInt(selectedYear);
 
@@ -173,15 +184,15 @@ function computeKPIs(
 
   // Member Hours
   const mhMap: Record<string, { tickets: number; hours: number }> = {};
-  TEAM_MEMBERS.forEach(m => { mhMap[m.toLowerCase()] = { tickets: 0, hours: 0 }; });
+  resolvedTeam.forEach((m: string) => { mhMap[m.toLowerCase()] = { tickets: 0, hours: 0 }; });
   filtered.forEach(issue => {
     const closer = (issue.closedBy || "").toLowerCase();
     const reporter = (issue.reporterUsername || "").toLowerCase();
     const key = teamLower.includes(closer) ? closer : teamLower.includes(reporter) ? reporter : null;
     if (key) { mhMap[key].tickets += 1; mhMap[key].hours += parseFloat(issue.supportHours) || 0; }
   });
-  const memberHours = TEAM_MEMBERS
-    .map((m, i) => ({ name: m, color: MEMBER_COLORS[i % MEMBER_COLORS.length], ...mhMap[m.toLowerCase()], avgHours: mhMap[m.toLowerCase()].tickets > 0 ? parseFloat((mhMap[m.toLowerCase()].hours / mhMap[m.toLowerCase()].tickets).toFixed(1)) : 0 }))
+  const memberHours = resolvedTeam
+    .map((m: string, i: number) => ({ name: m, color: MEMBER_COLORS[i % MEMBER_COLORS.length], ...mhMap[m.toLowerCase()], avgHours: mhMap[m.toLowerCase()].tickets > 0 ? parseFloat((mhMap[m.toLowerCase()].hours / mhMap[m.toLowerCase()].tickets).toFixed(1)) : 0 }))
     .filter(m => m.tickets > 0).sort((a, b) => b.avgHours - a.avgHours);
 
   // SLA
@@ -199,9 +210,13 @@ function computeKPIs(
     let hit = false;
     assignees.forEach((a: string) => { const al = a.toLowerCase(); if (teamLower.includes(al)) { wlMap[al] = (wlMap[al] || 0) + 1; hit = true; } });
     if (!hit && teamLower.includes(reporter)) wlMap[reporter] = (wlMap[reporter] || 0) + 1;
+    // For dynamic mode (no fixed team), also count unmatched assignees
+    if (!hit && assignees.length > 0 && teamLower.length === 0) {
+      assignees.forEach((a: string) => { const al = a.toLowerCase(); wlMap[al] = (wlMap[al] || 0) + 1; });
+    }
   });
-  const workloadData = TEAM_MEMBERS
-    .map((m, i) => ({ name: m, shortName: m.length > 12 ? m.substring(0, 10) + '…' : m, tickets: wlMap[m.toLowerCase()] || 0, color: MEMBER_COLORS[i % MEMBER_COLORS.length] }))
+  const workloadData = resolvedTeam
+    .map((m: string, i: number) => ({ name: m, shortName: m.length > 12 ? m.substring(0, 10) + '…' : m, tickets: wlMap[m.toLowerCase()] || 0, color: MEMBER_COLORS[i % MEMBER_COLORS.length] }))
     .filter(m => m.tickets > 0).sort((a, b) => b.tickets - a.tickets);
 
   // Client Type
@@ -649,9 +664,9 @@ function ProjectKPISection({
         const isObservingStatus = issue.customStatus === 'Under Observation (L2)';
         const isL2Label = issue.labelNames?.some((l: string) => l.toUpperCase() === 'L2') || false;
         return (isTeamAuthor || isTeamAssignee) && (isL2Status || isObservingStatus || isL2Label);
-      });
+      }, agentFilter);
     }
-    return computeKPIs(rawIssues || [], selectedMonth, selectedYear);
+    return computeKPIs(rawIssues || [], selectedMonth, selectedYear, undefined, undefined);
   }, [rawIssues, selectedMonth, selectedYear, agentFilter]);
 
   const handleSync = async () => {
