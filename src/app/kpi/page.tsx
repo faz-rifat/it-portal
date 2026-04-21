@@ -97,19 +97,20 @@ function computeKPIs(
 
   if (!rawIssues || selectedMonth === "" || selectedYear === "") return empty;
 
+  const targetMonth = parseInt(selectedMonth);
+  const targetYear = parseInt(selectedYear);
+
   // If teamMembers provided (Service Desk), use them. Otherwise derive from ticket assignees/reporters.
   const resolvedTeam: string[] = teamMembers && teamMembers.length > 0
     ? teamMembers
     : Array.from(new Set(
-        filtered.flatMap(issue => [
+        rawIssues.flatMap(issue => [
           ...(issue.assigneeUsernames || []),
           issue.reporterUsername || "",
           issue.closedBy || "",
         ].filter(Boolean))
       ));
   const teamLower = resolvedTeam.map((m: string) => m.toLowerCase());
-  const targetMonth = parseInt(selectedMonth);
-  const targetYear = parseInt(selectedYear);
 
   let filtered = rawIssues.filter(issue => {
     // Prefer dateReported (custom field) over githubCreatedAt (board addition date)
