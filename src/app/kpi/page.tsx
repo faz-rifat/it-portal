@@ -60,11 +60,12 @@ const MONTHS = [
   { label: "November", value: "10" }, { label: "December", value: "11" },
 ];
 
-// Generate years dynamically: 2024 → current year
+// Generate years dynamically: 2026 → current year (data collected from Jan 2026 onwards)
 const CURRENT_YEAR = new Date().getFullYear();
+const DATA_START_YEAR = 2026;
 const YEAR_OPTIONS = Array.from(
-  { length: CURRENT_YEAR - 2024 + 1 },
-  (_, i) => String(2024 + i)
+  { length: Math.max(CURRENT_YEAR - DATA_START_YEAR + 1, 1) },
+  (_, i) => String(DATA_START_YEAR + i)
 );
 
 const SLA_RESPONSE_THRESHOLD_MINUTES = 60;
@@ -84,11 +85,12 @@ function computeKPIs(
   selectedMonth: string,
   selectedYear: string,
   filterFn?: (issue: any) => boolean,
-  teamMembers?: string[]
+  teamMembers?: string[],
+  isEscalationProject?: boolean   // true only for Project 181
 ) {
   const empty = {
     total: 0, fcr: "0.0", art: "0.0", mttr: "0.0", chartData: [],
-    longestOpen: null, highestSupport: null, highestResolution: null, lowestResolution: null,
+    top3LongestOpen: [] as any[], top3HighestSupport: [] as any[],
     unmanagedTickets: [], resolutionRate: "0.0", closedCount: 0, openCount: 0,
     memberHours: [], slaBreachRate: "0.0", slaBreachCount: 0, slaCompliantCount: 0,
     workloadData: [], clientTypeData: [], escalationRate: "0.0",
@@ -116,6 +118,8 @@ function computeKPIs(
     // Prefer dateReported (custom field) over githubCreatedAt (board addition date)
     const dateStr = issue.dateReported || issue.githubCreatedAt;
     const d = new Date(dateStr);
+    // Only collect data from January 2026 onwards
+    if (getYear(d) < 2026) return false;
     return getMonth(d) === targetMonth && getYear(d) === targetYear;
   });
   if (filterFn) filtered = filtered.filter(filterFn);
@@ -145,31 +149,30 @@ function computeKPIs(
     );
   });
 
-  // Outliers
-  let longestOpen: any = null, maxDays = -1;
-  let highestSupport: any = null, maxHours = -1;
-  let highestResolution: any = null, maxResDays = -1;
-  let lowestResolution: any = null, minResDays = Infinity;
-
-  filtered.forEach(issue => {
+  // Top 3 Longest Open Tickets & Top 3 Highest Support Hours
+  // Scope: Label L2 + Status "Dhaka Team (L2)" (same as before)
+  const l2Candidates = filtered.filter(issue => {
     const hasL2Label = issue.labelNames?.some((l: string) => l.toUpperCase() === 'L2');
     const hasL2Status = issue.customStatus === 'Dhaka Team (L2)';
-    if (hasL2Label && hasL2Status) {
+    return hasL2Label && hasL2Status;
+  });
+
+  const top3LongestOpen = l2Candidates
+    .map(issue => {
       const created = new Date(issue.githubCreatedAt);
       const resolved = issue.dateResolved
         ? new Date(issue.dateResolved)
-        : issue.status === 'CLOSED' ? new Date(issue.githubUpdatedAt) : new Date();
-      const days = differenceInDays(resolved, created);
-      if (days > maxDays) { maxDays = days; longestOpen = { ...issue, durationDays: days }; }
-      const hrs = parseFloat(issue.supportHours) || 0;
-      if (hrs > maxHours) { maxHours = hrs; highestSupport = { ...issue, totalHours: hrs }; }
-      const closed = (issue.status || "").toUpperCase() === 'CLOSED' || (issue.customStatus || "").toLowerCase() === 'done';
-      if (closed) {
-        if (days > maxResDays) { maxResDays = days; highestResolution = { ...issue, resolutionDays: days }; }
-        if (days < minResDays) { minResDays = days; lowestResolution = { ...issue, resolutionDays: days }; }
-      }
-    }
-  });
+        : (issue.status === 'CLOSED' ? new Date(issue.githubUpdatedAt) : new Date());
+      return { ...issue, durationDays: differenceInDays(resolved, created) };
+    })
+    .sort((a, b) => b.durationDays - a.durationDays)
+    .slice(0, 3);
+
+  const top3HighestSupport = l2Candidates
+    .map(issue => ({ ...issue, totalHours: parseFloat(issue.supportHours) || 0 }))
+    .filter(issue => issue.totalHours > 0)
+    .sort((a, b) => b.totalHours - a.totalHours)
+    .slice(0, 3);
 
   const chartData = [
     { name: 'FCR %', value: parseFloat(fcr), color: 'hsl(var(--primary))' },
@@ -227,15 +230,26 @@ function computeKPIs(
     .map(([name, value], i) => ({ name, value, pct: parseFloat(((value / total) * 100).toFixed(1)), color: CLIENT_COLORS[i % CLIENT_COLORS.length] }))
     .sort((a, b) => b.value - a.value);
 
-  // Escalation
-  const escalatedCount = filtered.filter(i =>
-    i.labelNames?.some((l: string) => l.toUpperCase() === 'L2') || i.customStatus === 'Dhaka Team (L2)'
-  ).length;
-  const escalationRate = ((escalatedCount / total) * 100).toFixed(1);
+  // Escalation: Only applies to Project 181.
+  // A ticket is "escalated" if it was moved to/through "Dhaka Team (L2)"
+  // status, EXCLUDING those currently in "Under Observation (L2)".
+  const escalatedCount = isEscalationProject
+    ? filtered.filter(i => {
+        const status = (i.customStatus || "").toLowerCase().trim();
+        const isUnderObservation = status === 'under observation (l2)';
+        const isDhakaL2 = status === 'dhaka team (l2)';
+        const hasL2Label = i.labelNames?.some((l: string) => l.toUpperCase() === 'L2') || false;
+        // Escalated = reached Dhaka Team (L2) AND is NOT currently "Under Observation (L2)"
+        return (isDhakaL2 || hasL2Label) && !isUnderObservation;
+      }).length
+    : 0;
+  const escalationRate = isEscalationProject
+    ? ((escalatedCount / total) * 100).toFixed(1)
+    : "N/A";
 
   return {
     total, fcr, art, mttr, chartData,
-    longestOpen, highestSupport, highestResolution, lowestResolution, unmanagedTickets,
+    top3LongestOpen, top3HighestSupport, unmanagedTickets,
     resolutionRate, closedCount, openCount: total - closedCount,
     memberHours, slaBreachRate, slaBreachCount, slaCompliantCount: total - slaBreachCount,
     workloadData, clientTypeData,
@@ -272,7 +286,7 @@ const CARD_COLOR_CLASSES: Record<string, { card: string; title: string; badge: s
 function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKPIs>; selectedMonth: string }) {
   const rrNum = parseFloat(stats.resolutionRate);
   const slaNum = parseFloat(stats.slaBreachRate);
-  const escNum = parseFloat(stats.escalationRate);
+  const escNum = stats.escalationRate === "N/A" ? 0 : parseFloat(stats.escalationRate);
 
   return (
     <div className="space-y-8">
@@ -307,42 +321,71 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
         </Card>
       </div>
 
-      {/* Outlier Cards — 2x2 grid */}
+      {/* Outlier Cards — Top 3 each */}
       <div className="grid gap-6 md:grid-cols-2">
-        {[
-            { data: stats.longestOpen, title: "Longest Open Ticket", icon: <AlertTriangle className="h-4 w-4" />, color: "amber", badge: (d: any) => `${d.durationDays} Days`, scope: "Label L2 + Status Dhaka Team (L2)" },
-            { data: stats.highestSupport, title: "Highest Support Hours", icon: <Trophy className="h-4 w-4" />, color: "purple", badge: (d: any) => `${d.totalHours} Hours`, scope: "Label L2 + Status Dhaka Team (L2)" },
-            { data: stats.highestResolution, title: "Highest Resolution Time", icon: <Zap className="h-4 w-4" />, color: "green", badge: (d: any) => `${d.resolutionDays} Days`, scope: "Closed tickets only" },
-            { data: stats.lowestResolution, title: "Lowest Resolution Time", icon: <Trophy className="h-4 w-4" />, color: "sky", badge: (d: any) => `${d.resolutionDays} Days`, scope: "Closed tickets only" },
-          ].map(({ data, title, icon, color, badge, scope }) => {
-            const cc = CARD_COLOR_CLASSES[color] ?? CARD_COLOR_CLASSES.amber;
-            return (
-            <Card key={title} className={cc.card}>
-              <CardHeader className="py-4">
-                <CardTitle className={`text-sm font-bold flex items-center gap-2 ${cc.title}`}>{icon} {title}</CardTitle>
-                <CardDescription>{scope}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {data ? (
-                  <div className="space-y-3">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="space-y-1">
-                        <p className="text-xs font-bold leading-tight">{data.title}</p>
-                        <p className="text-[10px] text-muted-foreground font-mono">#{data.githubIssueNumber}</p>
-                      </div>
-                      <Badge variant="outline" className={`${cc.badge} whitespace-nowrap`}>{badge(data)}</Badge>
-                    </div>
-                    <a href={data.url} target="_blank" rel="noopener noreferrer" className="text-[10px] text-primary font-bold flex items-center gap-1 hover:underline">
+        {/* Top 3 Longest Open Tickets */}
+        <Card className="border-amber-200 bg-amber-50/30">
+          <CardHeader className="py-4">
+            <CardTitle className="text-sm font-bold flex items-center gap-2 text-amber-700">
+              <AlertTriangle className="h-4 w-4" /> Top 3 Longest Open Tickets
+            </CardTitle>
+            <CardDescription>Label L2 + Status "Dhaka Team (L2)" — by open duration</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {stats.top3LongestOpen.length > 0 ? stats.top3LongestOpen.map((data, idx) => (
+              <div key={data.id || idx} className="flex items-start justify-between gap-3 p-2 rounded-md bg-white/60 border border-amber-100">
+                <div className="flex items-start gap-2 min-w-0">
+                  <span className="text-[10px] font-black text-amber-400 w-4 shrink-0 mt-0.5">#{idx + 1}</span>
+                  <div className="min-w-0 space-y-0.5">
+                    <p className="text-xs font-bold leading-tight truncate">{data.title}</p>
+                    <p className="text-[10px] text-muted-foreground font-mono">#{data.githubIssueNumber}</p>
+                    <a href={data.url} target="_blank" rel="noopener noreferrer"
+                      className="text-[10px] text-primary font-bold flex items-center gap-1 hover:underline">
                       VIEW ON GITHUB <ExternalLink className="h-2.5 w-2.5" />
                     </a>
                   </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground text-center py-4 italic">No L2 records found for this period.</p>
-                )}
-              </CardContent>
-            </Card>
-            );
-          })}
+                </div>
+                <Badge variant="outline" className="bg-white text-amber-700 border-amber-200 whitespace-nowrap shrink-0">
+                  {data.durationDays} Days
+                </Badge>
+              </div>
+            )) : (
+              <p className="text-xs text-muted-foreground text-center py-4 italic">No L2 records found for this period.</p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Top 3 Highest Support Hours Tickets */}
+        <Card className="border-purple-200 bg-purple-50/30">
+          <CardHeader className="py-4">
+            <CardTitle className="text-sm font-bold flex items-center gap-2 text-purple-700">
+              <Trophy className="h-4 w-4" /> Top 3 Highest Support Hours
+            </CardTitle>
+            <CardDescription>Label L2 + Status "Dhaka Team (L2)" — by support hours logged</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {stats.top3HighestSupport.length > 0 ? stats.top3HighestSupport.map((data, idx) => (
+              <div key={data.id || idx} className="flex items-start justify-between gap-3 p-2 rounded-md bg-white/60 border border-purple-100">
+                <div className="flex items-start gap-2 min-w-0">
+                  <span className="text-[10px] font-black text-purple-400 w-4 shrink-0 mt-0.5">#{idx + 1}</span>
+                  <div className="min-w-0 space-y-0.5">
+                    <p className="text-xs font-bold leading-tight truncate">{data.title}</p>
+                    <p className="text-[10px] text-muted-foreground font-mono">#{data.githubIssueNumber}</p>
+                    <a href={data.url} target="_blank" rel="noopener noreferrer"
+                      className="text-[10px] text-primary font-bold flex items-center gap-1 hover:underline">
+                      VIEW ON GITHUB <ExternalLink className="h-2.5 w-2.5" />
+                    </a>
+                  </div>
+                </div>
+                <Badge variant="outline" className="bg-white text-purple-700 border-purple-200 whitespace-nowrap shrink-0">
+                  {data.totalHours} Hrs
+                </Badge>
+              </div>
+            )) : (
+              <p className="text-xs text-muted-foreground text-center py-4 italic">No L2 records found for this period.</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Extended KPIs divider */}
@@ -408,14 +451,15 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
         </Card>
       </div>
 
-      {/* Escalation Rate */}
+      {/* Escalation Rate — Project 181 only */}
+      {stats.escalationRate !== "N/A" && (
       <Card className="shadow-sm hover:shadow-md transition-shadow border-orange-200">
         <CardHeader className="pb-3">
           <CardTitle className="text-sm font-bold flex items-center justify-between text-orange-700">
             <span className="flex items-center gap-2"><ArrowUpCircle className="h-4 w-4" /> Escalation Rate</span>
             <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200 text-xs font-bold">{stats.escalationRate}%</Badge>
           </CardTitle>
-          <CardDescription>Tickets with Label L2 or Status "Dhaka Team (L2)"</CardDescription>
+          <CardDescription>Tickets moved to "Dhaka Team (L2)", excluding "Under Observation (L2)"</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
@@ -443,6 +487,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
           </div>
         </CardContent>
       </Card>
+      )}
 
       {/* Workload Distribution */}
       <Card className="shadow-sm hover:shadow-md transition-shadow border-blue-200">
@@ -641,19 +686,20 @@ function ProjectKPISection({
 
   const stats = useMemo(() => {
     if (agentFilter && agentFilter.length > 0) {
+      // Project 181: filter tickets where an agent PARTICIPATED (assignee, reporter, or closedBy)
       const agentsLower = agentFilter.map(m => m.toLowerCase());
       return computeKPIs(rawIssues || [], selectedMonth, selectedYear, (issue) => {
-        const isTeamAuthor = agentsLower.includes((issue.reporterUsername || "").toLowerCase());
-        const isTeamAssignee = (issue.assigneeUsernames || []).some(
+        const isTeamAuthor    = agentsLower.includes((issue.reporterUsername || "").toLowerCase());
+        const isTeamAssignee  = (issue.assigneeUsernames || []).some(
           (a: string) => agentsLower.includes(a.toLowerCase())
         );
-        const isL2Status = issue.customStatus === 'Dhaka Team (L2)';
-        const isObservingStatus = issue.customStatus === 'Under Observation (L2)';
-        const isL2Label = issue.labelNames?.some((l: string) => l.toUpperCase() === 'L2') || false;
-        return (isTeamAuthor || isTeamAssignee) && (isL2Status || isObservingStatus || isL2Label);
-      }, agentFilter);
+        const isTeamCloser    = agentsLower.includes((issue.closedBy || "").toLowerCase());
+        // Include if the agent participated in any capacity
+        return isTeamAuthor || isTeamAssignee || isTeamCloser;
+      }, agentFilter, true /* isEscalationProject */);
     }
-    return computeKPIs(rawIssues || [], selectedMonth, selectedYear, undefined, undefined);
+    // Projects 358 & 305: all participating agents, no escalation rate
+    return computeKPIs(rawIssues || [], selectedMonth, selectedYear, undefined, undefined, false);
   }, [rawIssues, selectedMonth, selectedYear, agentFilter]);
 
   const handleSync = async () => {
