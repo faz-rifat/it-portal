@@ -24,8 +24,8 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useCollection, useFirestore, useMemoFirebase, useUser, setDocumentNonBlocking } from '@/firebase';
-import { collection, query, orderBy, doc } from 'firebase/firestore';
+import { useCollection, useFirestore, useMemoFirebase, useUser } from '@/firebase';
+import { collection, query, orderBy, doc, setDoc, writeBatch } from 'firebase/firestore';
 import { getMonth, getYear, differenceInDays } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -115,10 +115,7 @@ function computeKPIs(
   const teamLower = resolvedTeam.map((m: string) => m.toLowerCase());
 
   let filtered = rawIssues.filter(issue => {
-    // Prefer dateReported (custom field) over githubCreatedAt (board addition date)
-    const dateStr = issue.dateReported || issue.githubCreatedAt;
-    const d = new Date(dateStr);
-    // Only collect data from January 2026 onwards
+    const d = new Date(issue.issueCreatedAt || issue.githubCreatedAt);
     if (getYear(d) < 2026) return false;
     return getMonth(d) === targetMonth && getYear(d) === targetYear;
   });
@@ -127,20 +124,32 @@ function computeKPIs(
   const total = filtered.length;
   if (total === 0) return { ...empty };
 
-  // Core KPIs
-  const fcrYesCount = filtered.filter(i => (i.fcr || "").toLowerCase() === 'yes').length;
-  const fcr = ((fcrYesCount / total) * 100).toFixed(1);
+  const isClosed = (i: any) =>
+    (i.status || "").toUpperCase() === 'CLOSED' || (i.customStatus || "").toLowerCase().trim() === 'done' || i.githubClosed === true;
 
-  const totalRT = filtered.reduce((a, c) => a + (parseFloat(c.responseTimeMinutes) || 0), 0);
-  const art = (totalRT / total).toFixed(1);
+  // Bug fix #3 — FCR must be calculated over CLOSED tickets only.
+  // Open tickets have no FCR value yet, including them dilutes the rate.
+  const closedTickets = filtered.filter(isClosed);
+  const fcrYesCount = closedTickets.filter(i => (i.fcr || "").toLowerCase() === 'yes').length;
+  const fcr = closedTickets.length > 0
+    ? ((fcrYesCount / closedTickets.length) * 100).toFixed(1)
+    : "0.0";
 
-  const totalSH = filtered.reduce((a, c) => a + (parseFloat(c.supportHours) || 0), 0);
-  const mttr = (totalSH / total).toFixed(1);
+  // Bug fix #2 — ART/MTTR must only average tickets that actually have data.
+  // Tickets with responseTimeMinutes = 0 (open / not yet filled) drag the average down.
+  const rtTickets = filtered.filter(i => parseFloat(i.responseTimeMinutes) > 0);
+  const art = rtTickets.length > 0
+    ? (rtTickets.reduce((a, c) => a + parseFloat(c.responseTimeMinutes), 0) / rtTickets.length).toFixed(1)
+    : "0.0";
+
+  const shTickets = filtered.filter(i => parseFloat(i.supportHours) > 0);
+  const mttr = shTickets.length > 0
+    ? (shTickets.reduce((a, c) => a + parseFloat(c.supportHours), 0) / shTickets.length).toFixed(1)
+    : "0.0";
 
   // Unmanaged
   const unmanagedTickets = filtered.filter(i => {
-    const closed = (i.status || "").toUpperCase() === 'CLOSED' || (i.customStatus || "").toLowerCase() === 'done';
-    if (!closed) return false;
+    if (!isClosed(i)) return false;
     return (
       isNaN(parseFloat(i.responseTimeMinutes)) || parseFloat(i.responseTimeMinutes) === 0 ||
       isNaN(parseFloat(i.supportHours)) || parseFloat(i.supportHours) === 0 ||
@@ -150,14 +159,7 @@ function computeKPIs(
   });
 
   // Top 3 Longest Open Tickets & Top 3 Highest Support Hours
-  // Scope: Label L2 + Status "Dhaka Team (L2)" (same as before)
-  const l2Candidates = filtered.filter(issue => {
-    const hasL2Label = issue.labelNames?.some((l: string) => l.toUpperCase() === 'L2');
-    const hasL2Status = issue.customStatus === 'Dhaka Team (L2)';
-    return hasL2Label && hasL2Status;
-  });
-
-  const top3LongestOpen = l2Candidates
+  const top3LongestOpen = filtered
     .map(issue => {
       const created = new Date(issue.githubCreatedAt);
       const resolved = issue.dateResolved
@@ -168,7 +170,7 @@ function computeKPIs(
     .sort((a, b) => b.durationDays - a.durationDays)
     .slice(0, 3);
 
-  const top3HighestSupport = l2Candidates
+  const top3HighestSupport = filtered
     .map(issue => ({ ...issue, totalHours: parseFloat(issue.supportHours) || 0 }))
     .filter(issue => issue.totalHours > 0)
     .sort((a, b) => b.totalHours - a.totalHours)
@@ -180,48 +182,79 @@ function computeKPIs(
     { name: 'MTTR', value: parseFloat(mttr), color: '#a855f7' },
   ];
 
-  // Resolution Rate
-  const closedCount = filtered.filter(i =>
-    (i.status || "").toUpperCase() === 'CLOSED' || (i.customStatus || "").toLowerCase() === 'done'
-  ).length;
+  // Resolution Rate — reuse the already-computed closedTickets array
+  const closedCount = closedTickets.length;
   const resolutionRate = ((closedCount / total) * 100).toFixed(1);
+
+  // Member Hours
+  // Bug fix #5 — use assignees-first attribution (same as workloadData) so both charts
+  // Attribution: all matched assignees get +1 each.
+  // Fallback (ClosedBy → Commenter → Reporter) only if no assignee matched.
+  const attributeToMembers = (issue: any): string[] => {
+    const assignees: string[] = issue.assigneeUsernames || [];
+    const matched = assignees.map(a => a.toLowerCase()).filter(a => teamLower.includes(a));
+    if (matched.length > 0) return matched;
+    const closer = (issue.closedBy || "").toLowerCase();
+    if (closer && teamLower.includes(closer)) return [closer];
+    const commenters: string[] = issue.commentAuthors || [];
+    for (const c of commenters) {
+      if (teamLower.includes(c.toLowerCase())) return [c.toLowerCase()];
+    }
+    const reporter = (issue.reporterUsername || "").toLowerCase();
+    if (reporter && teamLower.includes(reporter)) return [reporter];
+    return [];
+  };
 
   // Member Hours
   const mhMap: Record<string, { tickets: number; hours: number }> = {};
   resolvedTeam.forEach((m: string) => { mhMap[m.toLowerCase()] = { tickets: 0, hours: 0 }; });
   filtered.forEach(issue => {
-    const closer = (issue.closedBy || "").toLowerCase();
-    const reporter = (issue.reporterUsername || "").toLowerCase();
-    const key = teamLower.includes(closer) ? closer : teamLower.includes(reporter) ? reporter : null;
-    if (key) { mhMap[key].tickets += 1; mhMap[key].hours += parseFloat(issue.supportHours) || 0; }
+    const owners = attributeToMembers(issue);
+    if (owners.length === 0) return;
+    const hours = parseFloat(issue.supportHours) || 0;
+    owners.forEach(owner => { mhMap[owner].tickets += 1; mhMap[owner].hours += hours; });
   });
   const memberHours = resolvedTeam
     .map((m: string, i: number) => ({ name: m, color: MEMBER_COLORS[i % MEMBER_COLORS.length], ...mhMap[m.toLowerCase()], avgHours: mhMap[m.toLowerCase()].tickets > 0 ? parseFloat((mhMap[m.toLowerCase()].hours / mhMap[m.toLowerCase()].tickets).toFixed(1)) : 0 }))
     .filter(m => m.tickets > 0).sort((a, b) => b.avgHours - a.avgHours);
 
   // SLA
-  const slaBreachCount = filtered.filter(i =>
+  const slaEligible = filtered.filter(i =>
+    parseFloat(i.responseTimeMinutes) > 0 || parseFloat(i.supportHours) > 0
+  );
+  const slaBreachCount = slaEligible.filter(i =>
     (parseFloat(i.responseTimeMinutes) || 0) > SLA_RESPONSE_THRESHOLD_MINUTES ||
     (parseFloat(i.supportHours) || 0) > SLA_SUPPORT_THRESHOLD_HOURS
   ).length;
-  const slaBreachRate = ((slaBreachCount / total) * 100).toFixed(1);
+  const slaBreachRate = slaEligible.length > 0
+    ? ((slaBreachCount / slaEligible.length) * 100).toFixed(1)
+    : "0.0";
 
-  // Workload
-  const wlMap: Record<string, number> = {};
+  // Workload — uses same attribution, plus "Unassigned" bucket
+  const wlMap: Record<string, { total: number; open: number; closed: number }> = {};
+  let unassignedCount = 0;
   filtered.forEach(issue => {
-    const assignees: string[] = issue.assigneeUsernames || [];
-    const reporter = (issue.reporterUsername || "").toLowerCase();
-    let hit = false;
-    assignees.forEach((a: string) => { const al = a.toLowerCase(); if (teamLower.includes(al)) { wlMap[al] = (wlMap[al] || 0) + 1; hit = true; } });
-    if (!hit && teamLower.includes(reporter)) wlMap[reporter] = (wlMap[reporter] || 0) + 1;
-    // For dynamic mode (no fixed team), also count unmatched assignees
-    if (!hit && assignees.length > 0 && teamLower.length === 0) {
-      assignees.forEach((a: string) => { const al = a.toLowerCase(); wlMap[al] = (wlMap[al] || 0) + 1; });
+    const owners = attributeToMembers(issue);
+    const closed = isClosed(issue);
+    if (owners.length > 0) {
+      owners.forEach(owner => {
+        if (!wlMap[owner]) wlMap[owner] = { total: 0, open: 0, closed: 0 };
+        wlMap[owner].total += 1;
+        if (closed) wlMap[owner].closed += 1; else wlMap[owner].open += 1;
+      });
+    } else {
+      unassignedCount++;
     }
   });
-  const workloadData = resolvedTeam
-    .map((m: string, i: number) => ({ name: m, shortName: m.length > 12 ? m.substring(0, 10) + '…' : m, tickets: wlMap[m.toLowerCase()] || 0, color: MEMBER_COLORS[i % MEMBER_COLORS.length] }))
-    .filter(m => m.tickets > 0).sort((a, b) => b.tickets - a.tickets);
+  const workloadData = [
+    ...resolvedTeam
+      .map((m: string, i: number) => {
+        const d = wlMap[m.toLowerCase()] || { total: 0, open: 0, closed: 0 };
+        return { name: m, shortName: m.length > 12 ? m.substring(0, 10) + '…' : m, tickets: d.total, open: d.open, closed: d.closed, color: MEMBER_COLORS[i % MEMBER_COLORS.length] };
+      })
+      .filter(m => m.tickets > 0),
+    ...(unassignedCount > 0 ? [{ name: 'Unassigned', shortName: 'Unassigned', tickets: unassignedCount, open: unassignedCount, closed: 0, color: '#94a3b8' }] : []),
+  ].sort((a, b) => b.tickets - a.tickets);
 
   // Client Type
   const ctMap: Record<string, number> = {};
@@ -230,17 +263,11 @@ function computeKPIs(
     .map(([name, value], i) => ({ name, value, pct: parseFloat(((value / total) * 100).toFixed(1)), color: CLIENT_COLORS[i % CLIENT_COLORS.length] }))
     .sort((a, b) => b.value - a.value);
 
-  // Escalation: Only applies to Project 181.
-  // A ticket is "escalated" if it was moved to/through "Dhaka Team (L2)"
-  // status, EXCLUDING those currently in "Under Observation (L2)".
+  // Escalation: tickets escalated beyond L2 to L3/L4.
   const escalatedCount = isEscalationProject
     ? filtered.filter(i => {
         const status = (i.customStatus || "").toLowerCase().trim();
-        const isUnderObservation = status === 'under observation (l2)';
-        const isDhakaL2 = status === 'dhaka team (l2)';
-        const hasL2Label = i.labelNames?.some((l: string) => l.toUpperCase() === 'L2') || false;
-        // Escalated = reached Dhaka Team (L2) AND is NOT currently "Under Observation (L2)"
-        return (isDhakaL2 || hasL2Label) && !isUnderObservation;
+        return status.includes('(l3)') || status.includes('l4');
       }).length
     : 0;
   const escalationRate = isEscalationProject
@@ -251,9 +278,10 @@ function computeKPIs(
     total, fcr, art, mttr, chartData,
     top3LongestOpen, top3HighestSupport, unmanagedTickets,
     resolutionRate, closedCount, openCount: total - closedCount,
-    memberHours, slaBreachRate, slaBreachCount, slaCompliantCount: total - slaBreachCount,
+    memberHours, slaBreachRate, slaBreachCount, slaCompliantCount: slaEligible.length - slaBreachCount,
     workloadData, clientTypeData,
     escalationRate, escalatedCount, nonEscalatedCount: total - escalatedCount,
+    slaEligibleCount: slaEligible.length,
   };
 }
 
@@ -307,7 +335,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-secondary-foreground">{stats.art}</div>
-            <p className="text-[10px] text-muted-foreground mt-1 font-bold">Σ(ResponseTime) / Total Tickets</p>
+            <p className="text-[10px] text-muted-foreground mt-1 font-bold">Σ(ResponseTime) / Tickets with RT data</p>
           </CardContent>
         </Card>
         <Card className="shadow-sm border-purple-100 hover:shadow-md transition-shadow">
@@ -316,7 +344,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-purple-600">{stats.mttr}</div>
-            <p className="text-[10px] text-muted-foreground mt-1 font-bold">Σ(SupportHours) / Total Tickets</p>
+            <p className="text-[10px] text-muted-foreground mt-1 font-bold">Σ(SupportHours) / Tickets with SH data</p>
           </CardContent>
         </Card>
       </div>
@@ -329,7 +357,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
             <CardTitle className="text-sm font-bold flex items-center gap-2 text-amber-700">
               <AlertTriangle className="h-4 w-4" /> Top 3 Longest Open Tickets
             </CardTitle>
-            <CardDescription>Label L2 + Status "Dhaka Team (L2)" — by open duration</CardDescription>
+            <CardDescription>All tickets in period — by open duration</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {stats.top3LongestOpen.length > 0 ? stats.top3LongestOpen.map((data, idx) => (
@@ -350,7 +378,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
                 </Badge>
               </div>
             )) : (
-              <p className="text-xs text-muted-foreground text-center py-4 italic">No L2 records found for this period.</p>
+              <p className="text-xs text-muted-foreground text-center py-4 italic">No records found for this period.</p>
             )}
           </CardContent>
         </Card>
@@ -361,7 +389,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
             <CardTitle className="text-sm font-bold flex items-center gap-2 text-purple-700">
               <Trophy className="h-4 w-4" /> Top 3 Highest Support Hours
             </CardTitle>
-            <CardDescription>Label L2 + Status "Dhaka Team (L2)" — by support hours logged</CardDescription>
+            <CardDescription>All tickets in period — by support hours logged</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {stats.top3HighestSupport.length > 0 ? stats.top3HighestSupport.map((data, idx) => (
@@ -382,7 +410,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
                 </Badge>
               </div>
             )) : (
-              <p className="text-xs text-muted-foreground text-center py-4 italic">No L2 records found for this period.</p>
+              <p className="text-xs text-muted-foreground text-center py-4 italic">No records found for this period.</p>
             )}
           </CardContent>
         </Card>
@@ -436,7 +464,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
           <CardContent className="space-y-4">
             <Progress value={slaNum} className="h-3 bg-muted [&>div]:bg-red-500" />
             <div className="grid grid-cols-3 divide-x divide-border border rounded-lg overflow-hidden bg-muted/20">
-              {[["Total", stats.total, ""], ["Breached", stats.slaBreachCount, "text-red-600"], ["Compliant", stats.slaCompliantCount, "text-emerald-600"]].map(([label, val, cls]) => (
+              {[["Eligible", stats.slaEligibleCount, ""], ["Breached", stats.slaBreachCount, "text-red-600"], ["Compliant", stats.slaCompliantCount, "text-emerald-600"]].map(([label, val, cls]) => (
                 <div key={label as string} className="p-3 text-center">
                   <div className={`text-xl font-black ${cls}`}>{val}</div>
                   <div className="text-[9px] uppercase font-bold text-muted-foreground mt-0.5">{label}</div>
@@ -459,7 +487,7 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
             <span className="flex items-center gap-2"><ArrowUpCircle className="h-4 w-4" /> Escalation Rate</span>
             <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200 text-xs font-bold">{stats.escalationRate}%</Badge>
           </CardTitle>
-          <CardDescription>Tickets moved to "Dhaka Team (L2)", excluding "Under Observation (L2)"</CardDescription>
+          <CardDescription>L2 tickets escalated further to L3 or L4</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
@@ -504,10 +532,9 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
                     <CartesianGrid strokeDasharray="3 3" horizontal vertical={false} stroke="#f0f0f0" />
                     <XAxis type="number" allowDecimals={false} fontSize={10} />
                     <YAxis dataKey="shortName" type="category" axisLine={false} tickLine={false} fontSize={9} width={90} />
-                    <Tooltip formatter={(v) => [`${v} tickets`, 'Workload']} />
-                    <Bar dataKey="tickets" radius={[0, 4, 4, 0]} barSize={20}>
-                      {stats.workloadData.map((e, i) => <Cell key={i} fill={e.color} />)}
-                    </Bar>
+                    <Tooltip />
+                    <Bar dataKey="closed" stackId="a" fill="#10b981" barSize={20} name="Closed" />
+                    <Bar dataKey="open" stackId="a" fill="#f59e0b" radius={[0, 4, 4, 0]} barSize={20} name="Open" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -520,10 +547,14 @@ function KPIPanel({ stats, selectedMonth }: { stats: ReturnType<typeof computeKP
                       <div className="flex-1 space-y-1">
                         <div className="flex justify-between">
                           <span className="text-[11px] font-bold truncate max-w-[130px]">{m.name}</span>
-                          <span className="text-[11px] font-bold" style={{ color: m.color }}>{m.tickets} tickets</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold text-emerald-600">{m.closed} closed</span>
+                            <span className="text-[10px] font-bold text-amber-600">{m.open} open</span>
+                          </div>
                         </div>
-                        <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                          <div className="h-full rounded-full" style={{ width: `${pct}%`, background: m.color }} />
+                        <div className="h-1.5 rounded-full bg-muted overflow-hidden flex">
+                          {m.tickets > 0 && <div className="h-full bg-emerald-500" style={{ width: `${(m.closed / m.tickets) * 100}%` }} />}
+                          {m.tickets > 0 && <div className="h-full bg-amber-500" style={{ width: `${(m.open / m.tickets) * 100}%` }} />}
                         </div>
                       </div>
                       <span className="text-[9px] text-muted-foreground w-8 text-right font-bold">{pct}%</span>
@@ -686,7 +717,6 @@ function ProjectKPISection({
 
   const stats = useMemo(() => {
     if (agentFilter && agentFilter.length > 0) {
-      // Project 181: filter tickets where an agent PARTICIPATED (assignee, reporter, or closedBy)
       const agentsLower = agentFilter.map(m => m.toLowerCase());
       return computeKPIs(rawIssues || [], selectedMonth, selectedYear, (issue) => {
         const isTeamAuthor    = agentsLower.includes((issue.reporterUsername || "").toLowerCase());
@@ -694,8 +724,13 @@ function ProjectKPISection({
           (a: string) => agentsLower.includes(a.toLowerCase())
         );
         const isTeamCloser    = agentsLower.includes((issue.closedBy || "").toLowerCase());
-        // Include if the agent participated in any capacity
-        return isTeamAuthor || isTeamAssignee || isTeamCloser;
+        const isTeamCommenter = (issue.commentAuthors || []).some(
+          (a: string) => agentsLower.includes(a.toLowerCase())
+        );
+        const hasL2Label      = (issue.labelNames || []).some(
+          (l: string) => l.toUpperCase() === 'L2'
+        );
+        return isTeamAuthor || isTeamAssignee || isTeamCloser || isTeamCommenter || hasL2Label;
       }, agentFilter, true /* isEscalationProject */);
     }
     // Projects 358 & 305: all participating agents, no escalation rate
@@ -711,19 +746,23 @@ function ProjectKPISection({
       const items = result.items || [];
       const issuesCollection = collection(db, 'enterprise-projects', projectId, 'issues');
 
-      setDocumentNonBlocking(doc(db, 'enterprise-projects', projectId), {
+      await setDoc(doc(db, 'enterprise-projects', projectId), {
         id: projectId, githubProjectNumber: projectNumber,
         githubOrgName: "SELISEdigitalplatforms", githubRepoName: projectLabel,
         lastFetchedAt: new Date().toISOString(),
       }, { merge: true });
 
       let count = 0;
+      let batch = writeBatch(db);
+      let batchCount = 0;
+
       for (const item of items) {
         if (!item.content?.number) continue;
         const content = item.content;
         const issueId = `${projectId}-issue-${content.number}`;
         const issueRef = doc(issuesCollection, issueId);
-        const latestComment = content.comments?.nodes?.[0] || null;
+        const allComments = content.comments?.nodes || [];
+        const latestComment = allComments[allComments.length - 1] || null;
 
         const fieldMap: Record<string, string> = {};
         item.fieldValues?.nodes?.forEach((val: any) => {
@@ -740,15 +779,18 @@ function ProjectKPISection({
           return "";
         };
 
-        setDocumentNonBlocking(issueRef, {
+        batch.set(issueRef, {
           id: issueId, githubIssueNumber: content.number,
           title: content.title || "No Title", description: content.body || "",
           status: content.state || "UNKNOWN", url: content.url || "",
           reporterUsername: content.author?.login || "unknown",
           assigneeUsernames: content.assignees?.nodes?.map((n: any) => n.login) || [],
-          closedBy: gfv(["closed by", "closer", "completed by", "closedby", "mark as completed"]) || (content.closed ? "GitHub System" : ""),
+          closedBy: gfv(["closed by", "closer", "completed by", "closedby", "mark as completed"])
+            || (content.closed ? (content.assignees?.nodes?.[0]?.login || "GitHub System") : ""),
           labelNames: content.labels?.nodes?.map((n: any) => n.name) || [],
-          projectId, githubCreatedAt: gfv(["date reported", "reported at"]) || item.createdAt || new Date().toISOString(),
+          projectId,
+          issueCreatedAt: content.createdAt || item.createdAt || new Date().toISOString(),
+          githubCreatedAt: item.createdAt || new Date().toISOString(),
           githubUpdatedAt: content.updatedAt || new Date().toISOString(),
           lastFetchedAt: new Date().toISOString(),
           dateReported: gfv(["date reported", "reported at"]),
@@ -758,13 +800,24 @@ function ProjectKPISection({
           responseTimeMinutes: gfv(["response time (minutes)", "response time (mins)", "response time", "rt"]) || "0",
           fcr: gfv(["fcr", "fcr status"]) || "",
           customStatus: gfv(["status", "current status"]) || "",
+          githubClosed: content.closed || false,
+          commentAuthors: allComments.map((c: any) => c.author?.login).filter(Boolean),
           latestCommentBody: latestComment?.body || "",
           latestCommentAuthor: latestComment?.author?.login || "",
           latestCommentAt: latestComment?.createdAt || "",
           contentType: content.__typename || "Issue",
-        }, { merge: true });
+        });
         count++;
+        batchCount++;
+
+        if (batchCount >= 450) {
+          await batch.commit();
+          batch = writeBatch(db);
+          batchCount = 0;
+        }
       }
+
+      if (batchCount > 0) await batch.commit();
 
       toast({ title: "Sync Successful", description: `${projectLabel}: ${count} records updated.` });
     } catch (error: any) {

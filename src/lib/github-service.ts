@@ -16,6 +16,7 @@ export interface GitHubProjectItem {
     url: string;
     state: string;
     body: string;
+    createdAt: string;
     updatedAt: string;
     closed: boolean;
     author: { login: string } | null;
@@ -80,21 +81,21 @@ export async function fetchGitHubProjectItems(projectNumber: number = 181): Prom
     content {
       __typename
       ... on Issue {
-        title number url state body updatedAt closed
+        title number url state body createdAt updatedAt closed
         author { login }
         assignees(first: 10) { nodes { login } }
         labels(first: 20) { nodes { name } }
-        comments(last: 1) {
+        comments(last: 10) {
           nodes { body createdAt author { login } }
         }
       }
       ... on PullRequest {
-        title number url state body updatedAt
+        title number url state body createdAt updatedAt
         closed: merged
         author { login }
         assignees(first: 10) { nodes { login } }
         labels(first: 20) { nodes { name } }
-        comments(last: 1) {
+        comments(last: 10) {
           nodes { body createdAt author { login } }
         }
       }
